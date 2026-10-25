@@ -83,7 +83,7 @@ def test_chunk_repo_applies_filters(tmp_path):
     git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init")
 
     skipped = Counter()
-    records = list(chunk_repo(tmp_path, "org/repo", lambda t: len(t.split()), skipped))
+    records = list(chunk_repo(tmp_path, "org/repo", lambda t: len(t.split()), skipped, scan_secrets=False))
     assert sorted(r["path"] for r in records) == ["nb.ipynb", "src/app.py"]
     assert skipped == {"ignored path": 1}
     nb = next(r for r in records if r["path"] == "nb.ipynb")

@@ -4,6 +4,7 @@ Repos can add a `.ragignore` (gitignore syntax) at their root to exclude more pa
 """
 
 import json
+import warnings
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -92,7 +93,9 @@ def _looks_minified(text: str) -> bool:
 def _prepare_notebook(raw: bytes) -> Prepared | Skipped:
     """Source cells only, in jupytext percent format; outputs are dropped."""
     try:
-        nb = nbformat.reads(raw.decode("utf-8"), as_version=4)
+        with warnings.catch_warnings():  # old notebooks lack cell ids; harmless here
+            warnings.simplefilter("ignore")
+            nb = nbformat.reads(raw.decode("utf-8"), as_version=4)
     except (UnicodeDecodeError, json.JSONDecodeError, nbformat.reader.NotJSONError, nbformat.validator.ValidationError):
         return Skipped("invalid notebook")
     language = nb.metadata.get("language_info", {}).get("name") or nb.metadata.get("kernelspec", {}).get("language") or "python"

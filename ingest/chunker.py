@@ -20,6 +20,7 @@ from pathlib import Path, PurePosixPath
 
 import tree_sitter_language_pack as tslp
 
+from ingest import secret_scan
 from ingest.filters import Skipped, load_ignore, prepare_file
 
 MIN_TOKENS = 200
@@ -293,21 +294,41 @@ def _paragraph_units(lines: list[str], start: int, end: int, symbols: list[str])
 # ---- repos ------------------------------------------------------------------
 
 
-def chunk_repo(repo_dir: Path, repo: str, count_tokens: TokenCounter, skipped: Counter | None = None) -> Iterator[dict]:
-    """Chunk every tracked file that passes ingest.filters; counts skip reasons into `skipped`."""
+def chunk_repo(
+    repo_dir: Path,
+    repo: str,
+    count_tokens: TokenCounter,
+    skipped: Counter | None = None,
+    redacted: list | None = None,
+    scan_secrets: bool = True,
+) -> Iterator[dict]:
+    """Chunk every tracked file that passes ingest.filters, with secrets redacted.
+
+    Skip reasons are counted into `skipped`; redacted findings are appended to `redacted`.
+    """
     git = lambda *args: subprocess.run(["git", "-C", str(repo_dir), *args], capture_output=True, text=True, check=True).stdout  # noqa: E731
     commit_sha = git("rev-parse", "HEAD").strip()
     ignore = load_ignore(repo_dir)
+    findings = secret_scan.scan(repo_dir) if scan_secrets else {}
+    all_secrets = {f.secret for fs in findings.values() for f in fs if f.secret}
     for path in git("ls-files", "-z").split("\0"):
         file = repo_dir / path
         if not path or not file.is_file() or file.is_symlink():
             continue
-        prepared = prepare_file(path, file.read_bytes(), ignore)
+        raw = file.read_bytes()
+        if path in findings:
+            raw = secret_scan.redact(raw, findings[path])
+            if redacted is not None:
+                redacted.extend(findings[path])
+        prepared = prepare_file(path, raw, ignore)
         if isinstance(prepared, Skipped):
             if skipped is not None:
                 skipped[prepared.reason] += 1
             continue
-        yield from chunk_file(repo, path, prepared.source, commit_sha, count_tokens, language=prepared.language)
+        for record in chunk_file(repo, path, prepared.source, commit_sha, count_tokens, language=prepared.language):
+            if any(secret in record["text"] for secret in all_secrets):
+                raise RuntimeError(f"A detected secret survived redaction in {path}; refusing to write it")
+            yield record
 
 
 def main():
@@ -315,14 +336,19 @@ def main():
     parser.add_argument("repo_dir", type=Path)
     parser.add_argument("--repo", required=True, help="owner/name on GitHub")
     parser.add_argument("--out", type=Path, default=Path("chunks.jsonl"))
+    parser.add_argument("--no-secret-scan", action="store_true", help="Skip gitleaks (never for real ingestion)")
     args = parser.parse_args()
     count_tokens = llama_token_counter()
-    n, skipped = 0, Counter()
+    n, skipped, redacted = 0, Counter(), []
     with args.out.open("w") as f:
-        for record in chunk_repo(args.repo_dir, args.repo, count_tokens, skipped):
+        for record in chunk_repo(args.repo_dir, args.repo, count_tokens, skipped, redacted, not args.no_secret_scan):
             f.write(json.dumps(record) + "\n")
             n += 1
     print(f"Wrote {n} chunks to {args.out}; skipped files: {dict(skipped) or 'none'}")
+    if args.no_secret_scan:
+        print("WARNING: secret scan disabled")
+    for finding in redacted:
+        print(f"Redacted {finding.rule} at {finding.path}:{finding.line}")
 
 
 if __name__ == "__main__":

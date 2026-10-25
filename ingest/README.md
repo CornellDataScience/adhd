@@ -18,4 +18,10 @@ needs network access.
 data, weights, media, minified or generated code, `.env` files, and files over 512 KB
 (64 KB for JSON/YAML/XML). Notebooks become Python in jupytext percent format with
 outputs dropped. A repo can exclude more paths with a `.ragignore` (gitignore syntax) at
-its root. Secret scanning is not done yet.
+its root.
+
+`secret_scan.py` runs [gitleaks](https://github.com/gitleaks/gitleaks) on the checkout
+before chunking and replaces each secret with `[REDACTED:<rule>]`, keeping line numbers.
+Ingestion stops if gitleaks isn't installed (`brew install gitleaks`, or the release binary
+on the cluster) unless you pass `--no-secret-scan`, and refuses to write any chunk that
+still contains a detected secret.

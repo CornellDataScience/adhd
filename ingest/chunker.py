@@ -12,13 +12,15 @@ import hashlib
 import json
 import re
 import subprocess
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
 import tree_sitter_language_pack as tslp
+
+from ingest.filters import Skipped, load_ignore, prepare_file
 
 MIN_TOKENS = 200
 MAX_TOKENS = 400
@@ -69,10 +71,13 @@ def chunk_file(
     count_tokens: TokenCounter,
     min_tokens: int = MIN_TOKENS,
     max_tokens: int = MAX_TOKENS,
+    language: str | None = None,
 ) -> list[dict]:
     text = source.decode("utf-8", errors="replace")
     lines = text.split("\n")
-    language = detect_language(path)
+    language = language or detect_language(path)
+    # Line numbers of converted notebooks don't match the .ipynb on GitHub, so link the file.
+    line_anchors = PurePosixPath(path).suffix != ".ipynb"
 
     def render(unit: Unit) -> str:
         symbol = ", ".join(dict.fromkeys(unit.symbols))
@@ -116,7 +121,7 @@ def chunk_file(
                 "language": language,
                 "kind": kind,
                 "commit_sha": commit_sha,
-                "source_url": f"https://github.com/{repo}/blob/{commit_sha}/{path}#L{start}-L{end}",
+                "source_url": f"https://github.com/{repo}/blob/{commit_sha}/{path}" + (f"#L{start}-L{end}" if line_anchors else ""),
                 "file_hash": file_hash,
                 "token_count": tokens(unit),
                 "text": body,
@@ -263,18 +268,21 @@ def _paragraph_units(lines: list[str], start: int, end: int, symbols: list[str])
 # ---- repos ------------------------------------------------------------------
 
 
-def chunk_repo(repo_dir: Path, repo: str, count_tokens: TokenCounter) -> Iterator[dict]:
-    """Chunk every tracked text file. Real filtering and secret scanning come before this."""
+def chunk_repo(repo_dir: Path, repo: str, count_tokens: TokenCounter, skipped: Counter | None = None) -> Iterator[dict]:
+    """Chunk every tracked file that passes ingest.filters; counts skip reasons into `skipped`."""
     git = lambda *args: subprocess.run(["git", "-C", str(repo_dir), *args], capture_output=True, text=True, check=True).stdout  # noqa: E731
     commit_sha = git("rev-parse", "HEAD").strip()
+    ignore = load_ignore(repo_dir)
     for path in git("ls-files", "-z").split("\0"):
         file = repo_dir / path
-        if not path or not file.is_file():
+        if not path or not file.is_file() or file.is_symlink():
             continue
-        source = file.read_bytes()
-        if b"\0" in source[:8192]:
+        prepared = prepare_file(path, file.read_bytes(), ignore)
+        if isinstance(prepared, Skipped):
+            if skipped is not None:
+                skipped[prepared.reason] += 1
             continue
-        yield from chunk_file(repo, path, source, commit_sha, count_tokens)
+        yield from chunk_file(repo, path, prepared.source, commit_sha, count_tokens, language=prepared.language)
 
 
 def main():
@@ -284,12 +292,12 @@ def main():
     parser.add_argument("--out", type=Path, default=Path("chunks.jsonl"))
     args = parser.parse_args()
     count_tokens = llama_token_counter()
-    n = 0
+    n, skipped = 0, Counter()
     with args.out.open("w") as f:
-        for record in chunk_repo(args.repo_dir, args.repo, count_tokens):
+        for record in chunk_repo(args.repo_dir, args.repo, count_tokens, skipped):
             f.write(json.dumps(record) + "\n")
             n += 1
-    print(f"Wrote {n} chunks to {args.out}")
+    print(f"Wrote {n} chunks to {args.out}; skipped files: {dict(skipped) or 'none'}")
 
 
 if __name__ == "__main__":

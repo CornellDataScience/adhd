@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "generate.schema.json",
+  "title": "/generate",
+  "description": "Same contract for Mamba-3 and the Transformer baseline. The backend builds the prompt; this service only runs the model.",
+  "$defs": {
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prompt"],
+      "properties": {
+        "prompt": {"type": "string", "minLength": 1},
+        "max_new_tokens": {"type": "integer", "minimum": 1, "maximum": 1024, "default": 256},
+        "temperature": {"type": "number", "minimum": 0, "default": 1.0},
+        "top_k": {"type": "integer", "minimum": 0, "default": 1, "description": "1 = greedy, 0 = no limit."},
+        "top_p": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.0, "description": "0 = disabled."},
+        "stop": {"type": "array", "items": {"type": "string"}, "default": []}
+      },
+      "examples": [{"prompt": "Answer using the numbered sources.\n...\nAnswer:", "max_new_tokens": 200}]
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "model", "usage", "timing"],
+      "properties": {
+        "text": {"type": "string"},
+        "model": {"type": "string", "description": "Checkpoint id, e.g. state-spaces/mamba3-siso-443m."},
+        "usage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["prompt_tokens", "completion_tokens"],
+          "properties": {
+            "prompt_tokens": {"type": "integer", "minimum": 0},
+            "completion_tokens": {"type": "integer", "minimum": 0}
+          }
+        },
+        "timing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["time_to_first_token_ms", "total_ms", "tokens_per_second"],
+          "properties": {
+            "time_to_first_token_ms": {"type": "number", "minimum": 0},
+            "total_ms": {"type": "number", "minimum": 0},
+            "tokens_per_second": {"type": "number", "minimum": 0},
+            "peak_gpu_memory_mb": {"type": ["number", "null"], "minimum": 0}
+          }
+        }
+      },
+      "examples": [{
+        "text": "load_model uses the official kernels when mamba_ssm and a GPU are available [1].",
+        "model": "state-spaces/mamba3-siso-443m",
+        "usage": {"prompt_tokens": 1180, "completion_tokens": 21},
+        "timing": {"time_to_first_token_ms": 210.5, "total_ms": 960.2, "tokens_per_second": 28.0, "peak_gpu_memory_mb": 2150.0}
+      }]
+    }
+  }
+}

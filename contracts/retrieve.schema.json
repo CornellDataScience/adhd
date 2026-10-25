@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "retrieve.schema.json",
+  "title": "/retrieve",
+  "$defs": {
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "question"
+      ],
+      "properties": {
+        "question": {
+          "type": "string",
+          "minLength": 1
+        },
+        "k": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30,
+          "default": 4,
+          "description": "Chunks to return after reranking."
+        },
+        "repos": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Restrict to these repos; omit for all."
+        }
+      },
+      "examples": [
+        {
+          "question": "How does load_model pick a backend?",
+          "k": 4
+        }
+      ]
+    },
+    "response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "question",
+        "results",
+        "timing_ms"
+      ],
+      "properties": {
+        "question": {
+          "type": "string"
+        },
+        "results": {
+          "type": "array",
+          "description": "Best first. rank is the [n] used for citations in the prompt.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "rank",
+              "score",
+              "chunk"
+            ],
+            "properties": {
+              "rank": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "score": {
+                "type": "number",
+                "description": "Reranker score."
+              },
+              "chunk": {
+                "$ref": "chunk.schema.json"
+              }
+            }
+          }
+        },
+        "timing_ms": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "embed",
+            "search",
+            "rerank"
+          ],
+          "properties": {
+            "embed": {
+              "type": "number",
+              "minimum": 0
+            },
+            "search": {
+              "type": "number",
+              "minimum": 0
+            },
+            "rerank": {
+              "type": "number",
+              "minimum": 0
+            }
+          }
+        }
+      },
+      "examples": [
+        {
+          "question": "How does load_model pick a backend?",
+          "results": [
+            {
+              "rank": 1,
+              "score": 0.91,
+              "chunk": {
+                "id": "3f1c9a0d6b2e4f8a7c5d1e9b0a3f6c2d8e4b7a1f5c9d3e6b0a2f4c8d1e7b5a93",
+                "repo": "CornellDataScience/adhd",
+                "path": "mamba3/__init__.py",
+                "start_line": 30,
+                "end_line": 47,
+                "symbol": "load_model",
+                "language": "python",
+                "kind": "code",
+                "commit_sha": "08ae662c0b5f2b7e3d4a9c1e6f8b0d2a4c6e8f01",
+                "source_url": "https://github.com/CornellDataScience/adhd/blob/08ae662c0b5f2b7e3d4a9c1e6f8b0d2a4c6e8f01/mamba3/__init__.py#L30-L47",
+                "file_hash": "9b2d4f6a8c0e1b3d5f7a9c2e4b6d8f0a1c3e5b7d9f2a4c6e8b0d1f3a5c7e9b2d",
+                "token_count": 212,
+                "text": "# CornellDataScience/adhd mamba3/__init__.py:30-47 load_model(model_id, backend=\"auto\", device=None, dtype=None)\ndef load_model(model_id, backend=\"auto\", device=None, dtype=None):\n    ..."
+              }
+            }
+          ],
+          "timing_ms": {
+            "embed": 18.2,
+            "search": 41.7,
+            "rerank": 236.0
+          }
+        }
+      ]
+    }
+  }
+}

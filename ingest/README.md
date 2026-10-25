@@ -8,6 +8,9 @@ uv run python -m ingest.chunker path/to/repo --repo CornellDataScience/name --ou
 
 `chunker.py` splits code with tree-sitter at function and class boundaries and markdown at
 headings, packing pieces into chunks of 200-400 Llama-3.1 tokens (header included).
+Each chunk starts with a header like
+`# CornellDataScience/FTM-Snake src/game.rs:101-134 Game.tick | pub fn tick(&mut self, rng: &mut impl Rng) -> Status`;
+the signature after `|` appears only when the chunk continues a definition from an earlier chunk.
 Grammars download on first use into the tree-sitter-language-pack cache, so the first run
 needs network access.
 

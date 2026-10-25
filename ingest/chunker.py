@@ -24,6 +24,7 @@ from ingest.filters import Skipped, load_ignore, prepare_file
 
 MIN_TOKENS = 200
 MAX_TOKENS = 400
+MAX_SIGNATURE_CHARS = 150
 
 DOC_LANGUAGES = {"markdown", "rst", "text"}
 DEFINITION_RE = re.compile(r"function|class|method|struct|interface|enum|trait|impl|module|mod_item|type|namespace|macro")
@@ -53,6 +54,10 @@ class Unit:
     symbols: list[str] = field(default_factory=list)
     node: object | None = None  # tree-sitter node, when the unit is one syntax node
     prefix: list[str] = field(default_factory=list)  # enclosing definitions, for qualified names
+    signatures: dict[str, tuple[int, str]] = field(default_factory=dict)  # symbol -> (start line, signature)
+
+    def merge(self, other: "Unit") -> "Unit":
+        return Unit(self.start, other.end, self.symbols + other.symbols, signatures={**self.signatures, **other.signatures})
 
 
 def detect_language(path: str) -> str:
@@ -82,6 +87,10 @@ def chunk_file(
     def render(unit: Unit) -> str:
         symbol = ", ".join(dict.fromkeys(unit.symbols))
         header = f"# {repo} {path}:{unit.start + 1}-{unit.end + 1}" + (f" {symbol}" if symbol else "")
+        # Repeat the signature when the chunk continues a definition that starts above it.
+        continued = [sig for sym, (line, sig) in unit.signatures.items() if line < unit.start and sym in unit.symbols]
+        if continued:
+            header += " | " + "; ".join(continued)
         return header + "\n" + "\n".join(lines[unit.start : unit.end + 1])
 
     cache: dict[tuple, int] = {}
@@ -140,7 +149,7 @@ def _pack(units, lines, tokens, min_tokens, max_tokens) -> list[Unit]:
             queue.extendleft(reversed(_split(unit, lines)))
             continue
         if current is not None:
-            merged = Unit(current.start, unit.end, current.symbols + unit.symbols)
+            merged = current.merge(unit)
             if tokens(current) < min_tokens and tokens(merged) <= max_tokens:
                 current = merged
                 continue
@@ -150,7 +159,7 @@ def _pack(units, lines, tokens, min_tokens, max_tokens) -> list[Unit]:
         out.append(current)
     # A short tail is better joined to its predecessor when it fits.
     if len(out) >= 2 and tokens(out[-1]) < min_tokens:
-        merged = Unit(out[-2].start, out[-1].end, out[-2].symbols + out[-1].symbols)
+        merged = out[-2].merge(out[-1])
         if tokens(merged) <= max_tokens:
             out[-2:] = [merged]
     return out
@@ -163,9 +172,11 @@ def _split(unit: Unit, lines: list[str]) -> list[Unit]:
         if children:
             return children
     paragraphs = _paragraph_units(lines, unit.start, unit.end, unit.symbols)
-    if len(paragraphs) > 1:
-        return paragraphs
-    return [Unit(i, i, unit.symbols) for i in range(unit.start, unit.end + 1)]
+    if len(paragraphs) <= 1:
+        paragraphs = [Unit(i, i, unit.symbols) for i in range(unit.start, unit.end + 1)]
+    for paragraph in paragraphs:
+        paragraph.signatures = unit.signatures
+    return paragraphs
 
 
 # ---- code -------------------------------------------------------------------
@@ -187,6 +198,8 @@ def _node_units(nodes, prefix: list[str]) -> list[Unit]:
         symbols = [".".join(prefix + [name])] if name else []
         end = node.end_point[0] - (node.end_point[1] == 0 and node.end_point[0] > node.start_point[0])
         unit = Unit(node.start_point[0], end, symbols, node, prefix + ([name] if name else []))
+        if name:
+            unit.signatures = {symbols[0]: (unit.start, _signature(node))}
         if pending and pending.end + 1 >= unit.start:
             unit.start = pending.start
         elif pending:
@@ -212,6 +225,17 @@ def _definition_name(node) -> str | None:
     return name.text.decode("utf-8", errors="replace") if name is not None else None
 
 
+def _signature(node) -> str:
+    """The definition's text up to its body, on one line: `def f(a, b) -> int`."""
+    for wrapper_field in ("definition", "declaration"):
+        node = node.child_by_field_name(wrapper_field) or node
+    body = node.child_by_field_name("body")
+    text = node.text[: body.start_byte - node.start_byte] if body is not None else node.text.split(b"\n")[0]
+    signature = " ".join(text.decode("utf-8", errors="replace").split()).rstrip(" :{=")
+    signature = re.sub(r",?\s*([)\]])", r"\1", re.sub(r"([(\[])\s+", r"\1", signature))
+    return signature if len(signature) <= MAX_SIGNATURE_CHARS else signature[: MAX_SIGNATURE_CHARS - 3] + "..."
+
+
 def _body_units(unit: Unit) -> list[Unit]:
     node = unit.node
     for wrapper_field in ("definition", "declaration"):
@@ -222,8 +246,9 @@ def _body_units(unit: Unit) -> list[Unit]:
     children = _node_units(body.named_children, unit.prefix)
     for child in children:
         child.symbols = child.symbols or unit.symbols
+        child.signatures = {**unit.signatures, **child.signatures}
     if children[0].start > unit.start:  # signature, decorators, opening brace
-        children.insert(0, Unit(unit.start, children[0].start - 1, unit.symbols))
+        children.insert(0, Unit(unit.start, children[0].start - 1, unit.symbols, signatures=unit.signatures))
     if children[-1].end < unit.end:  # closing brace
         children[-1].end = unit.end
     return children

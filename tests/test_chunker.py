@@ -74,6 +74,19 @@ def test_python_chunks_follow_definitions():
     assert len(long_parts) >= 2  # split, and every piece keeps the name
 
 
+def test_continuation_headers_repeat_the_signature():
+    records, _ = chunk("pkg/mod.py", PYTHON)
+    first, *rest = [r for r in records if r["symbol"] and "long_function" in r["symbol"]]
+    assert " | " not in first["text"].split("\n")[0]  # the signature is already in the code
+    assert rest and all(r["text"].split("\n")[0].endswith(" | def long_function()") for r in rest)
+
+
+def test_multiline_signature_is_normalized():
+    source = "def f(\n    a,\n    b,\n):\n" + "".join(f"    x{i} = {i} + {i} + {i} + {i}\n\n" for i in range(12))
+    records, _ = chunk("pkg/f.py", source)
+    assert records[1]["text"].split("\n")[0].endswith(" | def f(a, b)")
+
+
 def test_oversized_class_splits_into_qualified_methods():
     records, _ = chunk("pkg/mod.py", PYTHON, min_tokens=5, max_tokens=25)
     symbols = " | ".join(r["symbol"] or "" for r in records)

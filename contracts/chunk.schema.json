@@ -19,7 +19,7 @@
     "source_url": {"type": "string", "format": "uri", "description": "GitHub link to the exact lines at commit_sha."},
     "file_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256 of the whole file; unchanged means skip re-embedding."},
     "token_count": {"type": "integer", "minimum": 1, "description": "Llama-3.1 tokens in text, header included."},
-    "text": {"type": "string", "description": "One-line header (repo, path, lines, symbol) followed by the chunk content."}
+    "text": {"type": "string", "description": "One-line header (repo, path, lines, symbol, plus \" | <signature>\" when the chunk continues a definition that starts above it) followed by the chunk content."}
   },
   "examples": [
     {

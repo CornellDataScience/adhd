@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "chunk.schema.json",
+  "title": "Chunk",
+  "description": "One line of chunks.jsonl and one row of the chunks table.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "repo", "path", "start_line", "end_line", "symbol", "language", "kind", "commit_sha", "source_url", "file_hash", "token_count", "text"],
+  "properties": {
+    "id": {"type": "string", "description": "sha256 of repo, path, start_line and text; stable across re-runs."},
+    "repo": {"type": "string", "description": "owner/name on GitHub.", "pattern": "^[^/]+/[^/]+$"},
+    "path": {"type": "string", "description": "File path relative to the repo root."},
+    "start_line": {"type": "integer", "minimum": 1},
+    "end_line": {"type": "integer", "minimum": 1},
+    "symbol": {"type": ["string", "null"], "description": "Qualified function or class name, or the heading for docs; null if none."},
+    "language": {"type": "string", "description": "tree-sitter language name, or markdown / text."},
+    "kind": {"enum": ["code", "doc", "readme", "file_tree", "file_summary"]},
+    "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "source_url": {"type": "string", "format": "uri", "description": "GitHub link to the exact lines at commit_sha."},
+    "file_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "sha256 of the whole file; unchanged means skip re-embedding."},
+    "token_count": {"type": "integer", "minimum": 1, "description": "Llama-3.1 tokens in text, header included."},
+    "text": {"type": "string", "description": "One-line header (repo, path, lines, symbol) followed by the chunk content."}
+  },
+  "examples": [
+    {
+      "id": "3f1c9a0d6b2e4f8a7c5d1e9b0a3f6c2d8e4b7a1f5c9d3e6b0a2f4c8d1e7b5a93",
+      "repo": "CornellDataScience/adhd",
+      "path": "mamba3/__init__.py",
+      "start_line": 30,
+      "end_line": 47,
+      "symbol": "load_model",
+      "language": "python",
+      "kind": "code",
+      "commit_sha": "08ae662c0b5f2b7e3d4a9c1e6f8b0d2a4c6e8f01",
+      "source_url": "https://github.com/CornellDataScience/adhd/blob/08ae662c0b5f2b7e3d4a9c1e6f8b0d2a4c6e8f01/mamba3/__init__.py#L30-L47",
+      "file_hash": "9b2d4f6a8c0e1b3d5f7a9c2e4b6d8f0a1c3e5b7d9f2a4c6e8b0d1f3a5c7e9b2d",
+      "token_count": 212,
+      "text": "# CornellDataScience/adhd mamba3/__init__.py:30-47 load_model(model_id, backend=\"auto\", device=None, dtype=None)\ndef load_model(model_id, backend=\"auto\", device=None, dtype=None):\n    ..."
+    }
+  ]
+}

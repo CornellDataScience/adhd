@@ -1,0 +1,3 @@
+# Indexed: public, non-fork, non-archived, non-empty repos in `org`, minus `exclude` (names only).
+org = "CornellDataScience"
+exclude = []

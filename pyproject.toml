@@ -9,6 +9,7 @@ dependencies = [
     "huggingface-hub>=0.30",
     "nbformat>=5.11.1",
     "pathspec>=1.1.1",
+    "pygithub>=2.10.0",
     "torch==2.14.1",
     "transformers>=4.50",
     "tree-sitter>=0.26.0",

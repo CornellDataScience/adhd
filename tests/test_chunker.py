@@ -179,3 +179,12 @@ def test_language_overrides():
     assert detect_language("requirements-dev.txt") == "requirements"
     assert detect_language("Makefile") == "make"
     assert detect_language("docker/Dockerfile") == "dockerfile"
+
+
+def test_sample_chunks_round_robin_across_files():
+    from ingest.sample import sample_chunks
+
+    records = [{"path": p, "start_line": i} for p in ("a", "b", "c") for i in range(5)]
+    picked = sample_chunks(records, 6)
+    assert sorted(r["path"] for r in picked) == ["a", "a", "b", "b", "c", "c"]
+    assert sample_chunks(records, 6) == picked  # deterministic

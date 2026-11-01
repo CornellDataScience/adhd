@@ -1,8 +1,4 @@
-"""Split files into chunks of at most MAX_TOKENS along function, class and heading boundaries.
-
-Small neighbouring pieces are merged until a chunk reaches MIN_TOKENS; pieces over
-MAX_TOKENS are split into their children (methods, paragraphs), then into lines.
-Output records follow contracts/chunk.schema.json.
+"""Split files into chunks along function, class and heading boundaries (contracts/chunk.schema.json).
 
     uv run python -m ingest.chunker path/to/repo --repo CornellDataScience/name --out chunks.jsonl
 """
@@ -186,9 +182,6 @@ def _split(unit: Unit, lines: list[str]) -> list[Unit]:
     return paragraphs
 
 
-# ---- code -------------------------------------------------------------------
-
-
 def _code_units(language: str, source: bytes, lines: list[str]) -> list[Unit]:
     try:
         tree = tslp.get_parser(language).parse(source)
@@ -261,9 +254,6 @@ def _body_units(unit: Unit) -> list[Unit]:
     return children
 
 
-# ---- docs -------------------------------------------------------------------
-
-
 def _markdown_units(lines: list[str]) -> list[Unit]:
     units: list[Unit] = []
     path: list[tuple[int, str]] = []
@@ -297,9 +287,6 @@ def _paragraph_units(lines: list[str], start: int, end: int, symbols: list[str])
     return units or [Unit(start, end, symbols)]
 
 
-# ---- repos ------------------------------------------------------------------
-
-
 def chunk_repo(
     repo_dir: Path,
     repo: str,
@@ -308,10 +295,7 @@ def chunk_repo(
     redacted: list | None = None,
     scan_secrets: bool = True,
 ) -> Iterator[dict]:
-    """Chunk every tracked file that passes ingest.filters, with secrets redacted.
-
-    Skip reasons are counted into `skipped`; redacted findings are appended to `redacted`.
-    """
+    """Chunk every tracked file that passes ingest.filters, with secrets redacted."""
     git = lambda *args: subprocess.run(["git", "-C", str(repo_dir), *args], capture_output=True, text=True, check=True).stdout  # noqa: E731
     commit_sha = git("rev-parse", "HEAD").strip()
     ignore = load_ignore(repo_dir)

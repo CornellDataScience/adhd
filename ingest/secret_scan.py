@@ -1,8 +1,4 @@
-"""Find secrets with gitleaks and redact them before files are chunked.
-
-Requires the gitleaks binary on PATH (https://github.com/gitleaks/gitleaks), or its path in
-$GITLEAKS. Secret values are never logged.
-"""
+"""Find secrets with gitleaks (on PATH or $GITLEAKS) and redact them. Secret values are never logged."""
 
 import json
 import os

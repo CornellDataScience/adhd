@@ -44,12 +44,12 @@ DEFAULT_IGNORE = [
     "*.min.js", "*.min.css", "*.map", "*_pb2.py", "*_pb2_grpc.py",
     # environment files may hold secrets
     ".env", ".env.*",
-    # tool config with nothing to answer questions from
+    # tool config
     ".gitignore", ".gitattributes", ".gitmodules", ".dockerignore", ".python-version",
     ".editorconfig", ".prettierrc*", ".eslintignore", ".npmrc", ".nvmrc",
 ]
 DATA_SUFFIXES = {".json", ".yaml", ".yml", ".xml", ".geojson"}
-# Inside these folders only source code and docs are kept (e.g. data/loader.py stays, data/train.json doesn't).
+# Only code and docs are kept inside these folders.
 DATA_DIRS = {
     "data", "dataset", "datasets", "raw", "processed", "interim", "output", "outputs", "results",
     "logs", "runs", "checkpoints", "artifacts", "wandb", "mlruns", "lightning_logs", "predictions",

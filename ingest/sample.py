@@ -1,5 +1,4 @@
-"""Build a small, deterministic sample of chunks across several repos, for retrieval
-development and tests.
+"""Build a small, deterministic sample of chunks across several repos.
 
     uv run python -m ingest.sample path/to/repo:CornellDataScience/name ... --n 100 --out samples/chunks.jsonl
 """

@@ -88,3 +88,32 @@ def test_chunk_repo_applies_filters(tmp_path):
     assert skipped == {"ignored path": 1}
     nb = next(r for r in records if r["path"] == "nb.ipynb")
     assert nb["language"] == "python" and "#L" not in nb["source_url"]
+
+
+@pytest.mark.parametrize("path", ["data/RESULTS.CSV", "img/Logo.PNG", "model/Weights.PT"])
+def test_default_ignores_are_case_insensitive(path, ignore):
+    assert prepare_file(path, b"x = 1\n", ignore) == Skipped("ignored path")
+
+
+def test_ragignore_is_case_sensitive(tmp_path):
+    (tmp_path / ".ragignore").write_text("Experiments/\n")
+    ignore = load_ignore(tmp_path)
+    assert prepare_file("Experiments/a.py", b"x = 1\n", ignore) == Skipped("ignored path")
+    assert prepare_file("experiments/a.py", b"x = 1\n", ignore) == Prepared(b"x = 1\n")
+
+
+@pytest.mark.parametrize("path", ["ml/data/train.json", "WWW/data/processed/train.json", "outputs/run1.txt", "results/metrics.yaml", "data/notes"])
+def test_data_directories_keep_only_code_and_docs(path, ignore):
+    assert prepare_file(path, b'{"a": 1}\n', ignore) == Skipped("data directory")
+
+
+@pytest.mark.parametrize("path", ["src/pkg/data/loader.py", "data/README.md", "data/explore.ipynb", "results/plot.R"])
+def test_code_and_docs_in_data_directories_pass(path, ignore):
+    assert not isinstance(prepare_file(path, notebook([("code", "x = 1")]) if path.endswith(".ipynb") else b"x = 1\n", ignore), Skipped)
+
+
+def test_tabular_text_is_skipped(ignore):
+    rows = b"".join(f"{i},{i * 2},{i * 3}\n".encode() for i in range(20))
+    assert prepare_file("predictions.txt", rows, ignore) == Skipped("tabular data")
+    assert prepare_file("table.md", b"".join(b"| a | b | c |\n" for _ in range(20)), ignore) == Prepared(b"".join(b"| a | b | c |\n" for _ in range(20)))
+    assert prepare_file("calls.py", b"".join(b"f(a, b, c)\n" for _ in range(20)), ignore) == Prepared(b"".join(b"f(a, b, c)\n" for _ in range(20)))

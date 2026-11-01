@@ -5,16 +5,19 @@ Repos can add a `.ragignore` (gitignore syntax) at their root to exclude more pa
 
 import json
 import warnings
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 import nbformat
 import pathspec
+import tree_sitter_language_pack as tslp
 
 MAX_FILE_BYTES = 512 * 1024
 MAX_DATA_FILE_BYTES = 64 * 1024  # JSON/YAML/XML above this is data, not config
 MAX_LINE_CHARS = 1000
 MAX_MEAN_LINE_CHARS = 200
+MIN_TABULAR_ROWS = 10
 
 DEFAULT_IGNORE = [
     # dependencies, build output, caches
@@ -27,7 +30,8 @@ DEFAULT_IGNORE = [
     # data
     "*.csv", "*.tsv", "*.jsonl", "*.ndjson", "*.parquet", "*.arrow", "*.feather", "*.avro",
     "*.xls", "*.xlsx", "*.pkl", "*.pickle", "*.npy", "*.npz", "*.h5", "*.hdf5", "*.mat",
-    "*.sqlite", "*.sqlite3", "*.db", "*.dta", "*.sav", "*.rds", "*.RData",
+    "*.sqlite", "*.sqlite3", "*.db", "*.dta", "*.sav", "*.rds", "*.rdata",
+    "*.vw", "*.dat", "*.data", "*.log", "*.out",
     # model weights
     "*.pt", "*.pth", "*.ckpt", "*.safetensors", "*.onnx", "*.bin", "*.gguf", "*.tflite", "*.joblib",
     # media, documents, archives, fonts
@@ -45,6 +49,13 @@ DEFAULT_IGNORE = [
     ".editorconfig", ".prettierrc*", ".eslintignore", ".npmrc", ".nvmrc",
 ]
 DATA_SUFFIXES = {".json", ".yaml", ".yml", ".xml", ".geojson"}
+# Inside these folders only source code and docs are kept (e.g. data/loader.py stays, data/train.json doesn't).
+DATA_DIRS = {
+    "data", "dataset", "datasets", "raw", "processed", "interim", "output", "outputs", "results",
+    "logs", "runs", "checkpoints", "artifacts", "wandb", "mlruns", "lightning_logs", "predictions",
+}
+DOC_SUFFIXES = {".md", ".markdown", ".rst", ".ipynb"}
+NON_CODE_LANGUAGES = {"csv", "tsv", "json", "yaml", "xml", "toml", "ini", "vimdoc", "requirements"}
 
 
 @dataclass
@@ -58,17 +69,35 @@ class Skipped:
     reason: str
 
 
-def load_ignore(repo_dir: Path) -> pathspec.GitIgnoreSpec:
-    lines = list(DEFAULT_IGNORE)
+class IgnoreRules:
+    """Default patterns match case-insensitively (`*.CSV`); a repo's .ragignore matches as written."""
+
+    def __init__(self, ragignore_lines: list[str]):
+        self.defaults = pathspec.GitIgnoreSpec.from_lines(DEFAULT_IGNORE)
+        self.repo = pathspec.GitIgnoreSpec.from_lines(ragignore_lines)
+
+    def match_file(self, path: str) -> bool:
+        return self.defaults.match_file(path.lower()) or self.repo.match_file(path)
+
+
+def load_ignore(repo_dir: Path) -> IgnoreRules:
     ragignore = repo_dir / ".ragignore"
-    if ragignore.is_file():
-        lines += ragignore.read_text().splitlines()
-    return pathspec.GitIgnoreSpec.from_lines(lines)
+    return IgnoreRules(ragignore.read_text().splitlines() if ragignore.is_file() else [])
 
 
-def prepare_file(path: str, raw: bytes, ignore: pathspec.GitIgnoreSpec) -> Prepared | Skipped:
+def is_code_or_docs(path: str) -> bool:
+    if PurePosixPath(path).suffix.lower() in DOC_SUFFIXES:
+        return True
+    language = tslp.detect_language_from_path(path)
+    return language is not None and language not in NON_CODE_LANGUAGES
+
+
+def prepare_file(path: str, raw: bytes, ignore: IgnoreRules) -> Prepared | Skipped:
     if ignore.match_file(path):
         return Skipped("ignored path")
+    in_data_dir = any(part.lower() in DATA_DIRS for part in PurePosixPath(path).parts[:-1])
+    if in_data_dir and not is_code_or_docs(path):
+        return Skipped("data directory")
     if b"\0" in raw[:8192]:
         return Skipped("binary")
     if PurePosixPath(path).suffix == ".ipynb":
@@ -82,12 +111,26 @@ def prepare_file(path: str, raw: bytes, ignore: pathspec.GitIgnoreSpec) -> Prepa
         return Skipped("empty")
     if _looks_minified(text):
         return Skipped("minified")
+    if not is_code_or_docs(path) and _looks_tabular(text):
+        return Skipped("tabular data")
     return Prepared(raw)
 
 
 def _looks_minified(text: str) -> bool:
     lines = text.splitlines() or [""]
     return max(map(len, lines)) > MAX_LINE_CHARS and len(text) / len(lines) > MAX_MEAN_LINE_CHARS
+
+
+def _looks_tabular(text: str) -> bool:
+    """Most rows share the same number (>= 2) of commas, tabs or semicolons."""
+    rows = [line for line in text.splitlines() if line.strip()][:200]
+    if len(rows) < MIN_TABULAR_ROWS:
+        return False
+    for delimiter in (",", "\t", ";"):
+        count, rows_with_count = Counter(row.count(delimiter) for row in rows).most_common(1)[0]
+        if count >= 2 and rows_with_count / len(rows) >= 0.8:
+            return True
+    return False
 
 
 def _prepare_notebook(raw: bytes) -> Prepared | Skipped:

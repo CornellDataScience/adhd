@@ -61,12 +61,18 @@ class Unit:
         return Unit(self.start, other.end, self.symbols + other.symbols, signatures={**self.signatures, **other.signatures})
 
 
+LANGUAGE_BY_NAME = {"cmakelists.txt": "cmake", "makefile": "make", "gnumakefile": "make", "dockerfile": "dockerfile"}
+LANGUAGE_BY_SUFFIX = {".md": "markdown", ".markdown": "markdown", ".rst": "rst", ".txt": "text"}  # tree-sitter calls .txt vimdoc
+
+
 def detect_language(path: str) -> str:
-    if PurePosixPath(path).suffix.lower() in {".md", ".markdown"}:
-        return "markdown"
-    if PurePosixPath(path).suffix.lower() == ".rst":
-        return "rst"
-    return tslp.detect_language_from_path(path) or "text"
+    p = PurePosixPath(path)
+    name = p.name.lower()
+    if name in LANGUAGE_BY_NAME:
+        return LANGUAGE_BY_NAME[name]
+    if name.startswith("requirements") and p.suffix == ".txt":
+        return "requirements"
+    return LANGUAGE_BY_SUFFIX.get(p.suffix.lower()) or tslp.detect_language_from_path(path) or "text"
 
 
 def chunk_file(

@@ -169,3 +169,13 @@ def test_single_huge_line_is_kept_whole():
 
 def test_blank_file_has_no_chunks():
     assert chunk("empty.py", "\n\n")[0] == []
+
+
+def test_language_overrides():
+    from ingest.chunker import detect_language
+
+    assert detect_language("notes.txt") == "text"  # tree-sitter would say vimdoc
+    assert detect_language("mods/CMakeLists.txt") == "cmake"
+    assert detect_language("requirements-dev.txt") == "requirements"
+    assert detect_language("Makefile") == "make"
+    assert detect_language("docker/Dockerfile") == "dockerfile"

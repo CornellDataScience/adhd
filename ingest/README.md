@@ -16,7 +16,9 @@ needs network access.
 
 `filters.py` decides what gets chunked: it skips dependency and build folders, lockfiles,
 data, weights, media, minified or generated code, `.env` files, and files over 512 KB
-(64 KB for JSON/YAML/XML). Notebooks become Python in jupytext percent format with
+(64 KB for JSON/YAML/XML). Extension patterns ignore case. In data-style folders (`data/`,
+`processed/`, `results/`, `logs/`, ...) only code and docs are kept, and any other file
+whose rows look like CSV/TSV is skipped whatever its extension. Notebooks become Python in jupytext percent format with
 outputs dropped. A repo can exclude more paths with a `.ragignore` (gitignore syntax) at
 its root.
 

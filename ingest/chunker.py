@@ -1,8 +1,4 @@
-"""Split files into chunks of at most MAX_TOKENS along function, class and heading boundaries.
-
-Small neighbouring pieces are merged until a chunk reaches MIN_TOKENS; pieces over
-MAX_TOKENS are split into their children (methods, paragraphs), then into lines.
-Output records follow contracts/chunk.schema.json.
+"""Split files into chunks along function, class and heading boundaries (contracts/chunk.schema.json).
 
     uv run python -m ingest.chunker path/to/repo --repo CornellDataScience/name --out chunks.jsonl
 """
@@ -12,7 +8,7 @@ import hashlib
 import json
 import re
 import subprocess
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -20,8 +16,12 @@ from pathlib import Path, PurePosixPath
 
 import tree_sitter_language_pack as tslp
 
+from ingest import secret_scan
+from ingest.filters import Skipped, load_ignore, prepare_file
+
 MIN_TOKENS = 200
-MAX_TOKENS = 400
+MAX_TOKENS = 350  # 4 chunks must fit in ~1,400 of Mamba-3's 2,048-token context
+MAX_SIGNATURE_CHARS = 150
 
 DOC_LANGUAGES = {"markdown", "rst", "text"}
 DEFINITION_RE = re.compile(r"function|class|method|struct|interface|enum|trait|impl|module|mod_item|type|namespace|macro")
@@ -51,14 +51,24 @@ class Unit:
     symbols: list[str] = field(default_factory=list)
     node: object | None = None  # tree-sitter node, when the unit is one syntax node
     prefix: list[str] = field(default_factory=list)  # enclosing definitions, for qualified names
+    signatures: dict[str, tuple[int, str]] = field(default_factory=dict)  # symbol -> (start line, signature)
+
+    def merge(self, other: "Unit") -> "Unit":
+        return Unit(self.start, other.end, self.symbols + other.symbols, signatures={**self.signatures, **other.signatures})
+
+
+LANGUAGE_BY_NAME = {"cmakelists.txt": "cmake", "makefile": "make", "gnumakefile": "make", "dockerfile": "dockerfile"}
+LANGUAGE_BY_SUFFIX = {".md": "markdown", ".markdown": "markdown", ".rst": "rst", ".txt": "text"}  # tree-sitter calls .txt vimdoc
 
 
 def detect_language(path: str) -> str:
-    if PurePosixPath(path).suffix.lower() in {".md", ".markdown"}:
-        return "markdown"
-    if PurePosixPath(path).suffix.lower() == ".rst":
-        return "rst"
-    return tslp.detect_language_from_path(path) or "text"
+    p = PurePosixPath(path)
+    name = p.name.lower()
+    if name in LANGUAGE_BY_NAME:
+        return LANGUAGE_BY_NAME[name]
+    if name.startswith("requirements") and p.suffix == ".txt":
+        return "requirements"
+    return LANGUAGE_BY_SUFFIX.get(p.suffix.lower()) or tslp.detect_language_from_path(path) or "text"
 
 
 def chunk_file(
@@ -69,14 +79,21 @@ def chunk_file(
     count_tokens: TokenCounter,
     min_tokens: int = MIN_TOKENS,
     max_tokens: int = MAX_TOKENS,
+    language: str | None = None,
 ) -> list[dict]:
     text = source.decode("utf-8", errors="replace")
     lines = text.split("\n")
-    language = detect_language(path)
+    language = language or detect_language(path)
+    # Line numbers of converted notebooks don't match the .ipynb on GitHub, so link the file.
+    line_anchors = PurePosixPath(path).suffix != ".ipynb"
 
     def render(unit: Unit) -> str:
         symbol = ", ".join(dict.fromkeys(unit.symbols))
         header = f"# {repo} {path}:{unit.start + 1}-{unit.end + 1}" + (f" {symbol}" if symbol else "")
+        # Repeat the signature when the chunk continues a definition that starts above it.
+        continued = [sig for sym, (line, sig) in unit.signatures.items() if line < unit.start and sym in unit.symbols]
+        if continued:
+            header += " | " + "; ".join(continued)
         return header + "\n" + "\n".join(lines[unit.start : unit.end + 1])
 
     cache: dict[tuple, int] = {}
@@ -116,7 +133,7 @@ def chunk_file(
                 "language": language,
                 "kind": kind,
                 "commit_sha": commit_sha,
-                "source_url": f"https://github.com/{repo}/blob/{commit_sha}/{path}#L{start}-L{end}",
+                "source_url": f"https://github.com/{repo}/blob/{commit_sha}/{path}" + (f"#L{start}-L{end}" if line_anchors else ""),
                 "file_hash": file_hash,
                 "token_count": tokens(unit),
                 "text": body,
@@ -135,7 +152,7 @@ def _pack(units, lines, tokens, min_tokens, max_tokens) -> list[Unit]:
             queue.extendleft(reversed(_split(unit, lines)))
             continue
         if current is not None:
-            merged = Unit(current.start, unit.end, current.symbols + unit.symbols)
+            merged = current.merge(unit)
             if tokens(current) < min_tokens and tokens(merged) <= max_tokens:
                 current = merged
                 continue
@@ -145,7 +162,7 @@ def _pack(units, lines, tokens, min_tokens, max_tokens) -> list[Unit]:
         out.append(current)
     # A short tail is better joined to its predecessor when it fits.
     if len(out) >= 2 and tokens(out[-1]) < min_tokens:
-        merged = Unit(out[-2].start, out[-1].end, out[-2].symbols + out[-1].symbols)
+        merged = out[-2].merge(out[-1])
         if tokens(merged) <= max_tokens:
             out[-2:] = [merged]
     return out
@@ -158,12 +175,11 @@ def _split(unit: Unit, lines: list[str]) -> list[Unit]:
         if children:
             return children
     paragraphs = _paragraph_units(lines, unit.start, unit.end, unit.symbols)
-    if len(paragraphs) > 1:
-        return paragraphs
-    return [Unit(i, i, unit.symbols) for i in range(unit.start, unit.end + 1)]
-
-
-# ---- code -------------------------------------------------------------------
+    if len(paragraphs) <= 1:
+        paragraphs = [Unit(i, i, unit.symbols) for i in range(unit.start, unit.end + 1)]
+    for paragraph in paragraphs:
+        paragraph.signatures = unit.signatures
+    return paragraphs
 
 
 def _code_units(language: str, source: bytes, lines: list[str]) -> list[Unit]:
@@ -182,6 +198,8 @@ def _node_units(nodes, prefix: list[str]) -> list[Unit]:
         symbols = [".".join(prefix + [name])] if name else []
         end = node.end_point[0] - (node.end_point[1] == 0 and node.end_point[0] > node.start_point[0])
         unit = Unit(node.start_point[0], end, symbols, node, prefix + ([name] if name else []))
+        if name:
+            unit.signatures = {symbols[0]: (unit.start, _signature(node))}
         if pending and pending.end + 1 >= unit.start:
             unit.start = pending.start
         elif pending:
@@ -207,6 +225,17 @@ def _definition_name(node) -> str | None:
     return name.text.decode("utf-8", errors="replace") if name is not None else None
 
 
+def _signature(node) -> str:
+    """The definition's text up to its body, on one line: `def f(a, b) -> int`."""
+    for wrapper_field in ("definition", "declaration"):
+        node = node.child_by_field_name(wrapper_field) or node
+    body = node.child_by_field_name("body")
+    text = node.text[: body.start_byte - node.start_byte] if body is not None else node.text.split(b"\n")[0]
+    signature = " ".join(text.decode("utf-8", errors="replace").split()).rstrip(" :{=")
+    signature = re.sub(r",?\s*([)\]])", r"\1", re.sub(r"([(\[])\s+", r"\1", signature))
+    return signature if len(signature) <= MAX_SIGNATURE_CHARS else signature[: MAX_SIGNATURE_CHARS - 3] + "..."
+
+
 def _body_units(unit: Unit) -> list[Unit]:
     node = unit.node
     for wrapper_field in ("definition", "declaration"):
@@ -217,14 +246,12 @@ def _body_units(unit: Unit) -> list[Unit]:
     children = _node_units(body.named_children, unit.prefix)
     for child in children:
         child.symbols = child.symbols or unit.symbols
+        child.signatures = {**unit.signatures, **child.signatures}
     if children[0].start > unit.start:  # signature, decorators, opening brace
-        children.insert(0, Unit(unit.start, children[0].start - 1, unit.symbols))
+        children.insert(0, Unit(unit.start, children[0].start - 1, unit.symbols, signatures=unit.signatures))
     if children[-1].end < unit.end:  # closing brace
         children[-1].end = unit.end
     return children
-
-
-# ---- docs -------------------------------------------------------------------
 
 
 def _markdown_units(lines: list[str]) -> list[Unit]:
@@ -260,21 +287,38 @@ def _paragraph_units(lines: list[str], start: int, end: int, symbols: list[str])
     return units or [Unit(start, end, symbols)]
 
 
-# ---- repos ------------------------------------------------------------------
-
-
-def chunk_repo(repo_dir: Path, repo: str, count_tokens: TokenCounter) -> Iterator[dict]:
-    """Chunk every tracked text file. Real filtering and secret scanning come before this."""
+def chunk_repo(
+    repo_dir: Path,
+    repo: str,
+    count_tokens: TokenCounter,
+    skipped: Counter | None = None,
+    redacted: list | None = None,
+    scan_secrets: bool = True,
+) -> Iterator[dict]:
+    """Chunk every tracked file that passes ingest.filters, with secrets redacted."""
     git = lambda *args: subprocess.run(["git", "-C", str(repo_dir), *args], capture_output=True, text=True, check=True).stdout  # noqa: E731
     commit_sha = git("rev-parse", "HEAD").strip()
+    ignore = load_ignore(repo_dir)
+    findings = secret_scan.scan(repo_dir) if scan_secrets else {}
+    all_secrets = {f.secret for fs in findings.values() for f in fs if f.secret}
     for path in git("ls-files", "-z").split("\0"):
         file = repo_dir / path
-        if not path or not file.is_file():
+        if not path or not file.is_file() or file.is_symlink():
             continue
-        source = file.read_bytes()
-        if b"\0" in source[:8192]:
+        raw = file.read_bytes()
+        if path in findings:
+            raw = secret_scan.redact(raw, findings[path])
+            if redacted is not None:
+                redacted.extend(findings[path])
+        prepared = prepare_file(path, raw, ignore)
+        if isinstance(prepared, Skipped):
+            if skipped is not None:
+                skipped[prepared.reason] += 1
             continue
-        yield from chunk_file(repo, path, source, commit_sha, count_tokens)
+        for record in chunk_file(repo, path, prepared.source, commit_sha, count_tokens, language=prepared.language):
+            if any(secret in record["text"] for secret in all_secrets):
+                raise RuntimeError(f"A detected secret survived redaction in {path}; refusing to write it")
+            yield record
 
 
 def main():
@@ -282,14 +326,19 @@ def main():
     parser.add_argument("repo_dir", type=Path)
     parser.add_argument("--repo", required=True, help="owner/name on GitHub")
     parser.add_argument("--out", type=Path, default=Path("chunks.jsonl"))
+    parser.add_argument("--no-secret-scan", action="store_true", help="Skip gitleaks (never for real ingestion)")
     args = parser.parse_args()
     count_tokens = llama_token_counter()
-    n = 0
+    n, skipped, redacted = 0, Counter(), []
     with args.out.open("w") as f:
-        for record in chunk_repo(args.repo_dir, args.repo, count_tokens):
+        for record in chunk_repo(args.repo_dir, args.repo, count_tokens, skipped, redacted, not args.no_secret_scan):
             f.write(json.dumps(record) + "\n")
             n += 1
-    print(f"Wrote {n} chunks to {args.out}")
+    print(f"Wrote {n} chunks to {args.out}; skipped files: {dict(skipped) or 'none'}")
+    if args.no_secret_scan:
+        print("WARNING: secret scan disabled")
+    for finding in redacted:
+        print(f"Redacted {finding.rule} at {finding.path}:{finding.line}")
 
 
 if __name__ == "__main__":

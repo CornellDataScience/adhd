@@ -74,6 +74,19 @@ def test_python_chunks_follow_definitions():
     assert len(long_parts) >= 2  # split, and every piece keeps the name
 
 
+def test_continuation_headers_repeat_the_signature():
+    records, _ = chunk("pkg/mod.py", PYTHON)
+    first, *rest = [r for r in records if r["symbol"] and "long_function" in r["symbol"]]
+    assert " | " not in first["text"].split("\n")[0]  # the signature is already in the code
+    assert rest and all(r["text"].split("\n")[0].endswith(" | def long_function()") for r in rest)
+
+
+def test_multiline_signature_is_normalized():
+    source = "def f(\n    a,\n    b,\n):\n" + "".join(f"    x{i} = {i} + {i} + {i} + {i}\n\n" for i in range(12))
+    records, _ = chunk("pkg/f.py", source)
+    assert records[1]["text"].split("\n")[0].endswith(" | def f(a, b)")
+
+
 def test_oversized_class_splits_into_qualified_methods():
     records, _ = chunk("pkg/mod.py", PYTHON, min_tokens=5, max_tokens=25)
     symbols = " | ".join(r["symbol"] or "" for r in records)
@@ -156,3 +169,22 @@ def test_single_huge_line_is_kept_whole():
 
 def test_blank_file_has_no_chunks():
     assert chunk("empty.py", "\n\n")[0] == []
+
+
+def test_language_overrides():
+    from ingest.chunker import detect_language
+
+    assert detect_language("notes.txt") == "text"  # tree-sitter would say vimdoc
+    assert detect_language("mods/CMakeLists.txt") == "cmake"
+    assert detect_language("requirements-dev.txt") == "requirements"
+    assert detect_language("Makefile") == "make"
+    assert detect_language("docker/Dockerfile") == "dockerfile"
+
+
+def test_sample_chunks_round_robin_across_files():
+    from ingest.sample import sample_chunks
+
+    records = [{"path": p, "start_line": i} for p in ("a", "b", "c") for i in range(5)]
+    picked = sample_chunks(records, 6)
+    assert sorted(r["path"] for r in picked) == ["a", "a", "b", "b", "c", "c"]
+    assert sample_chunks(records, 6) == picked  # deterministic

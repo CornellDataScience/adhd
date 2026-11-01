@@ -55,3 +55,11 @@ def test_chunk_rejects_bad_records():
     missing = copy.deepcopy(good)
     del missing["source_url"]
     assert not v.is_valid(missing)
+
+
+def test_sample_chunks_match_schema():
+    v = validator("chunk.schema.json")
+    lines = (CONTRACTS.parent / "samples" / "chunks.jsonl").read_text().splitlines()
+    assert len(lines) == 100
+    for line in lines:
+        v.validate(json.loads(line))

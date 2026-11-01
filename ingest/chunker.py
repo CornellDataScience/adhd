@@ -24,7 +24,7 @@ from ingest import secret_scan
 from ingest.filters import Skipped, load_ignore, prepare_file
 
 MIN_TOKENS = 200
-MAX_TOKENS = 400
+MAX_TOKENS = 350  # 4 chunks must fit in ~1,400 of Mamba-3's 2,048-token context
 MAX_SIGNATURE_CHARS = 150
 
 DOC_LANGUAGES = {"markdown", "rst", "text"}

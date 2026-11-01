@@ -3,6 +3,22 @@
 Clone CDS repos, filter, secret-scan, and chunk them into chunks.jsonl (steps 3-4).
 
 ```bash
+uv run python -m ingest.pipeline --root data/repos --out data/chunks.jsonl
+```
+
+`pipeline.py` runs the crawler, then chunks every synced repo into one file. Add
+`--only FTM-Snake slurm-aware` or `--limit 5` to crawl a few repos; partial runs never delete
+clones. Set `GITHUB_TOKEN` for higher API rate limits.
+
+`crawler.py` lists the org's public, non-fork, non-archived, non-empty repos (minus `exclude`
+in `repos.toml`), keeps a shallow clone of each default branch under `--root`, and records
+every repo's commit and status (`ok`, `stale`, `skipped`, `failed`, `removed`) in
+`<root>/manifest.json`. A clone with local changes is left alone, a failed update keeps the
+last good copy, and a full run deletes clones of repos that are no longer listed.
+
+To chunk one checkout by hand:
+
+```bash
 uv run python -m ingest.chunker path/to/repo --repo CornellDataScience/name --out chunks.jsonl
 ```
 

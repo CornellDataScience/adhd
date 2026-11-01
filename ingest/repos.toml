@@ -1,0 +1,4 @@
+# Which GitHub repos the crawler indexes: every public, non-fork, non-archived,
+# non-empty repo in `org`, minus `exclude` (names without the org).
+org = "CornellDataScience"
+exclude = []

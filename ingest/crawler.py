@@ -16,7 +16,7 @@ GIT_TIMEOUT_SECONDS = 600
 
 @dataclass
 class RepoInfo:
-    full_name: str  # owner/name
+    full_name: str
     clone_url: str
     default_branch: str
     fork: bool = False

@@ -22,5 +22,5 @@ jobs:
             | sudo tar -xz -C /usr/local/bin gitleaks
           gitleaks version
 
-      - run: uv sync --locked
+      - run: uv sync
       - run: uv run pytest

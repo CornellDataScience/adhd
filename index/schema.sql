@@ -1,5 +1,5 @@
 -- Database schema for RAG chunk storage
--- Matches contracts/chunk.schema.json
+-- Matches contracts/chunk.schema.json. Safe to re-run.
 
 -- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS vector;      -- pgvector for embeddings
@@ -32,12 +32,20 @@ CREATE TABLE IF NOT EXISTS chunks (
 
     -- Search indexes (populated by index/ scripts)
     embedding vector(1024),  -- Qwen/Qwen3-Embedding-0.6B, 1024 dimensions
+    embedding_model TEXT,    -- model that produced `embedding`, so vectors from different models never mix
     text_search tsvector,    -- Full-text search
 
     -- Timestamps
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+    CHECK ((embedding IS NULL) = (embedding_model IS NULL))
 );
+
+-- Upgrade tables created by earlier versions of this file.
+ALTER TABLE chunks ADD COLUMN IF NOT EXISTS embedding_model TEXT;
+ALTER TABLE chunks ALTER COLUMN created_at TYPE TIMESTAMPTZ;
+ALTER TABLE chunks ALTER COLUMN updated_at TYPE TIMESTAMPTZ;
 
 -- Indexes for fast retrieval
 -- No ANN index at init. Exact cosine until the table is large, then HNSW.
@@ -61,18 +69,19 @@ CREATE INDEX IF NOT EXISTS chunks_file_hash_idx ON chunks(file_hash);
 -- 4. Composite index for incremental updates
 CREATE INDEX IF NOT EXISTS chunks_repo_path_idx ON chunks(repo, path);
 
--- Function to auto-update text_search column
+-- Function to auto-update text_search column.
+-- 'simple' keeps identifiers intact; 'english' stems get_user_settings to get/user/set.
 CREATE OR REPLACE FUNCTION update_text_search()
 RETURNS TRIGGER AS $$
 BEGIN
-    NEW.text_search = to_tsvector('english', NEW.text);
+    NEW.text_search = to_tsvector('simple', NEW.text);
     NEW.updated_at = NOW();
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
 -- Trigger to keep text_search in sync
-CREATE TRIGGER chunks_text_search_update
+CREATE OR REPLACE TRIGGER chunks_text_search_update
 BEFORE INSERT OR UPDATE ON chunks
 FOR EACH ROW
 EXECUTE FUNCTION update_text_search();
@@ -92,6 +101,12 @@ FROM chunks
 GROUP BY repo, kind, language
 ORDER BY repo, kind, language;
 
--- Grant permissions (for development)
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO adhd;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO adhd;
+-- Grant permissions to the dev role, if it exists (see index/setup_local.sh)
+DO $$
+BEGIN
+    IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'adhd') THEN
+        GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO adhd;
+        GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO adhd;
+    END IF;
+END
+$$;

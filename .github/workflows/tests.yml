@@ -13,6 +13,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
         with:
+          version: "0.13.7"
           enable-cache: true
 
       # Release binary rather than gitleaks-action, which needs a license for organizations.

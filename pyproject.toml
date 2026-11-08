@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "einops>=0.8",
+    "fastapi>=0.162.2",
     "huggingface-hub>=0.30",
     "nbformat>=5.11.1",
     "pathspec>=1.1.1",
@@ -14,6 +15,7 @@ dependencies = [
     "transformers>=4.50",
     "tree-sitter>=0.26.0",
     "tree-sitter-language-pack>=1.22.1",
+    "uvicorn>=0.54.0",
 ]
 
 [project.optional-dependencies]

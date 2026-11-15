@@ -1,4 +1,4 @@
-"""Retrieval: BM25, and hybrid fusion when chunk embeddings are present."""
+"""Retrieval: BM25, hybrid fusion, and a rerank of the top 20."""
 
 from retrieval.retrieve import retrieve
 

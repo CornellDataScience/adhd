@@ -1,8 +1,7 @@
 """Load chunk rows and build a retrieve-contract response.
 
-Chunks with no embedding are ranked by in-process BM25 only. When any chunk
-has an embedding, that BM25 list and an exact-cosine list are merged with
-reciprocal rank fusion.
+The first stage is BM25, or BM25 fused with exact cosine when any chunk has
+an embedding. The top 20 of that list are rescored by the Qwen reranker.
 """
 
 import os
@@ -18,6 +17,7 @@ DEFAULT_DATABASE_URL = "postgresql://adhd:dev_password_change_in_prod@localhost:
 MAX_K = 30
 KEYWORD_LIMIT = 50
 VECTOR_LIMIT = 50
+RERANK_LIMIT = 20
 
 # Public response fields. The embedding column is read for cosine and then dropped.
 CHUNK_FIELDS = (
@@ -53,6 +53,7 @@ def retrieve(
     connection=None,
     database_url: str | None = None,
     embedder=None,
+    reranker=None,
 ) -> dict:
     """Rank chunks for ``question``.
 
@@ -60,19 +61,23 @@ def retrieve(
     to 4, must be at least 1, and is clamped to 30. ``repos`` limits the search
     to those repositories when it is set.
 
-    With no embeddings, ``score`` is the reciprocal-rank score of the BM25 list
-    alone (same order as BM25), ``timing_ms.embed`` is 0, and ``timing_ms.search``
-    is this pass. With embeddings, the keyword and vector lists are up to 50
-    each, ``score`` is the fusion score, ``timing_ms.embed`` is the query
-    embedding, and ``timing_ms.search`` is the two lists plus the merge.
-    ``timing_ms.rerank`` is 0 either way.
+    The first stage keeps up to 50 keyword hits and, when any chunk has an
+    embedding, up to 50 cosine hits, merged by reciprocal rank fusion. With
+    no embeddings the question is not embedded and that stage follows BM25
+    order. The top 20 fused hits are rescored, ``score`` is that reranker
+    score, and at most ``k`` of them are returned. ``timing_ms.embed`` is the
+    query embedding, ``timing_ms.search`` is the two lists plus the merge, and
+    ``timing_ms.rerank`` is the rescore. An empty candidate list skips the
+    reranker and leaves ``timing_ms.rerank`` at 0.
 
     Pass ``chunks`` or ``connection`` to avoid opening Postgres. Otherwise the
     URL comes from ``database_url``, ``DATABASE_URL``, or
     ``DEFAULT_DATABASE_URL``. Injected ``chunks`` win when both are passed.
     ``embedder`` maps the question to a vector. When it is omitted and a
     vector list is needed, ``retrieval.embed.embed_query`` loads
-    ``Qwen/Qwen3-Embedding-0.6B``.
+    ``Qwen/Qwen3-Embedding-0.6B``. ``reranker`` maps the question and the
+    candidate texts to one score each. When it is omitted,
+    ``retrieval.rerank.rerank`` loads ``Qwen/Qwen3-Reranker-0.6B``.
     """
     if k < 1:
         raise ValueError("k must be at least 1")
@@ -99,17 +104,47 @@ def retrieve(
     else:
         vector_ids = top_cosine([chunk["id"] for chunk in rows], vectors, query_vector, VECTOR_LIMIT)
     by_id = {chunk["id"]: chunk for chunk in rows}
-    results = []
-    for chunk_id, score in fuse([keyword_ids, vector_ids]):
-        results.append({"rank": len(results) + 1, "score": float(score), "chunk": by_id[chunk_id]})
-        if len(results) == k:
+    pool = []
+    for chunk_id, _score in fuse([keyword_ids, vector_ids]):
+        pool.append(by_id[chunk_id])
+        if len(pool) == RERANK_LIMIT:
             break
     search_ms = round((time.perf_counter() - search_started) * 1000, 3)
+
+    rerank_ms = 0
+    if pool:
+        rerank_started = time.perf_counter()
+        scores = _rerank_pool(question, pool, reranker)
+        rerank_ms = round((time.perf_counter() - rerank_started) * 1000, 3)
+        # Equal reranker scores keep the first-stage order.
+        order = sorted(range(len(pool)), key=lambda index: (-scores[index], index))
+        ranked = [pool[index] for index in order]
+        ranked_scores = [scores[index] for index in order]
+    else:
+        ranked = []
+        ranked_scores = []
+    results = [
+        {"rank": index + 1, "score": float(ranked_scores[index]), "chunk": chunk}
+        for index, chunk in enumerate(ranked[:k])
+    ]
     return {
         "question": question,
         "results": results,
-        "timing_ms": {"embed": embed_ms, "search": search_ms, "rerank": 0},
+        "timing_ms": {"embed": embed_ms, "search": search_ms, "rerank": rerank_ms},
     }
+
+
+def _rerank_pool(question: str, pool: list[dict], reranker) -> list[float]:
+    documents = [chunk["text"] for chunk in pool]
+    if reranker is None:
+        from retrieval.rerank import rerank
+
+        scores = rerank(question, documents)
+    else:
+        scores = [float(score) for score in reranker(question, documents)]
+    if len(scores) != len(documents):
+        raise ValueError("reranker must return one score per document")
+    return scores
 
 
 def _embed_question(question: str, embedder) -> list[float]:

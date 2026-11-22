@@ -1,9 +1,12 @@
 import sys
 
 import pytest
+from pgvector import Vector
 
 from retrieval.bm25 import B, K1, bm25_scores
-from retrieval.retrieve import DEFAULT_DATABASE_URL, resolve_database_url, retrieve
+from retrieval.cosine import top_cosine
+from retrieval.retrieve import DEFAULT_DATABASE_URL, RERANK_LIMIT, resolve_database_url, retrieve
+from retrieval.rrf import RANK_CONSTANT, fuse
 from retrieval.tokenize import tokenize
 from tests.test_contracts import validator
 
@@ -105,6 +108,11 @@ class FakeConnection:
         self.closed = True
 
 
+def preserve_hybrid_order(_question, documents):
+    """Higher score for an earlier first-stage hit, so rerank keeps that order."""
+    return [float(len(documents) - index) for index in range(len(documents))]
+
+
 class BoomConnection:
     def cursor(self):
         raise AssertionError("injected chunks must not open a cursor")
@@ -120,11 +128,12 @@ def test_retrieve_response_is_schema_valid_and_ranked():
         repos=["CornellDataScience/adhd"],
         chunks=sample_chunks(),
         connection=BoomConnection(),
+        reranker=preserve_hybrid_order,
     )
     RESPONSE.validate(response)
     assert response["question"] == "How does load_model pick a backend?"
     assert response["timing_ms"]["embed"] == 0
-    assert response["timing_ms"]["rerank"] == 0
+    assert response["timing_ms"]["rerank"] >= 0
     assert response["timing_ms"]["search"] >= 0
     assert [hit["chunk"]["repo"] for hit in response["results"]] == ["CornellDataScience/adhd"] * len(
         response["results"]
@@ -139,18 +148,35 @@ def test_retrieve_response_is_schema_valid_and_ranked():
     assert "chunk-4" in ids
 
 
-def test_k_defaults_to_4_and_clamps_at_30():
+def test_k_defaults_to_4_and_the_rerank_pool_caps_the_response():
+    assert RERANK_LIMIT == 20
     chunks = [
         make_chunk(i, "CornellDataScience/adhd", "load_model keeps this chunk relevant")
         for i in range(1, 36)
     ]
-    defaulted = retrieve("load_model", chunks=chunks)
+    defaulted = retrieve("load_model", chunks=chunks, reranker=preserve_hybrid_order)
     assert len(defaulted["results"]) == 4
     assert [hit["rank"] for hit in defaulted["results"]] == [1, 2, 3, 4]
-    clamped = retrieve("load_model", k=100, chunks=chunks)
-    assert len(clamped["results"]) == 30
-    assert [hit["rank"] for hit in clamped["results"]] == list(range(1, 31))
+    clamped = retrieve("load_model", k=100, chunks=chunks, reranker=preserve_hybrid_order)
+    assert len(clamped["results"]) == 20
+    assert [hit["rank"] for hit in clamped["results"]] == list(range(1, 21))
     RESPONSE.validate(clamped)
+
+
+def test_reranker_receives_only_the_top_20():
+    chunks = [
+        make_chunk(index, "CornellDataScience/adhd", "load_model " + ("pad " * index))
+        for index in range(25)
+    ]
+    seen = []
+
+    def reranker(question, documents):
+        seen.append(len(documents))
+        return preserve_hybrid_order(question, documents)
+
+    response = retrieve("load_model", k=30, chunks=chunks, reranker=reranker)
+    assert seen == [RERANK_LIMIT]
+    assert len(response["results"]) == RERANK_LIMIT
 
 
 def test_k_below_one_is_rejected():
@@ -167,6 +193,7 @@ def test_retrieve_from_fake_connection_filters_repos_without_ts_rank():
         k=4,
         repos=["CornellDataScience/FTM-Snake"],
         connection=connection,
+        reranker=preserve_hybrid_order,
     )
     RESPONSE.validate(response)
     assert connection.closed is False
@@ -177,21 +204,26 @@ def test_retrieve_from_fake_connection_filters_repos_without_ts_rank():
     assert "tsvector" not in folded
     assert "text_search" not in folded
     assert "to_tsquery" not in folded
+    assert "embedding" in folded
     assert params == (["CornellDataScience/FTM-Snake"],)
     assert [hit["rank"] for hit in response["results"]] == [1]
     assert response["results"][0]["chunk"]["id"] == "chunk-3"
     assert response["results"][0]["chunk"]["repo"] == "CornellDataScience/FTM-Snake"
     assert response["timing_ms"]["embed"] == 0
-    assert response["timing_ms"]["rerank"] == 0
+    assert response["timing_ms"]["rerank"] >= 0
     assert response["timing_ms"]["search"] >= 0
 
 
-def test_search_timing_is_measured(monkeypatch):
-    ticks = iter([1.0, 1.5])
+def test_search_and_rerank_timing_are_separate(monkeypatch):
+    ticks = iter([1.0, 1.5, 2.0, 2.25])
     retrieve_mod = sys.modules["retrieval.retrieve"]
     monkeypatch.setattr(retrieve_mod.time, "perf_counter", lambda: next(ticks))
-    response = retrieve("load_model", chunks=[make_chunk(2, "CornellDataScience/adhd", "load_model")])
-    assert response["timing_ms"] == {"embed": 0, "search": 500.0, "rerank": 0}
+    response = retrieve(
+        "load_model",
+        chunks=[make_chunk(2, "CornellDataScience/adhd", "load_model")],
+        reranker=preserve_hybrid_order,
+    )
+    assert response["timing_ms"] == {"embed": 0, "search": 500.0, "rerank": 250.0}
 
 
 def test_database_url_override_does_not_connect(monkeypatch):
@@ -201,3 +233,118 @@ def test_database_url_override_does_not_connect(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgresql://unit-test/db")
     assert resolve_database_url() == "postgresql://unit-test/db"
     assert resolve_database_url("postgresql://arg/db") == "postgresql://arg/db"
+
+
+def test_fusion_uses_rank_constant_60_and_starts_at_one():
+    assert RANK_CONSTANT == 60
+    fused = fuse([["both", "keyword-only"], ["both", "vector-only"]])
+    scores = dict(fused)
+    assert scores["both"] == pytest.approx(1 / 61 + 1 / 61)
+    assert scores["keyword-only"] == pytest.approx(1 / 62)
+    assert scores["vector-only"] == pytest.approx(1 / 62)
+    assert [item_id for item_id, _score in fused] == ["both", "keyword-only", "vector-only"]
+
+
+def test_fusion_keeps_a_chunk_that_appears_in_only_one_list():
+    fused = fuse([["only-keyword"], []])
+    assert fused == [("only-keyword", pytest.approx(1 / 61))]
+
+
+def test_cosine_skips_null_and_mismatched_vectors_and_breaks_ties_by_id():
+    ids = top_cosine(
+        ["b", "a", "missing", "wide"],
+        [[1.0, 0.0], [1.0, 0.0], None, [1.0, 0.0, 0.0]],
+        [1.0, 0.0],
+        limit=50,
+    )
+    assert ids == ["a", "b"]
+
+
+def test_hybrid_fusion_promotes_the_chunk_in_both_lists():
+    best = make_chunk(1, "CornellDataScience/adhd", "load_model")
+    best["id"] = "a"
+    both = make_chunk(2, "CornellDataScience/adhd", "load_model extra")
+    both["id"] = "b"
+    both["embedding"] = Vector([0.0, 1.0])
+    also = make_chunk(3, "CornellDataScience/adhd", "load_model extra words here too")
+    also["id"] = "c"
+    also["embedding"] = "[0.0, 1.0]"
+    response = retrieve(
+        "load_model",
+        k=4,
+        chunks=[best, both, also],
+        embedder=lambda question: [0.0, 1.0],
+        reranker=preserve_hybrid_order,
+    )
+    RESPONSE.validate(response)
+    assert [hit["chunk"]["id"] for hit in response["results"]] == ["b", "c", "a"]
+    assert response["results"][0]["score"] == pytest.approx(3.0)
+    assert "embedding" not in response["results"][0]["chunk"]
+    assert response["timing_ms"]["rerank"] >= 0
+    assert response["timing_ms"]["embed"] >= 0
+
+
+def test_query_embed_time_is_separate_from_search(monkeypatch):
+    ticks = iter([0.0, 1.0, 1.25, 2.0, 2.5, 3.0, 3.4])
+    retrieve_mod = sys.modules["retrieval.retrieve"]
+    monkeypatch.setattr(retrieve_mod.time, "perf_counter", lambda: next(ticks))
+    chunk = make_chunk(2, "CornellDataScience/adhd", "load_model")
+    chunk["embedding"] = [1.0, 0.0]
+    response = retrieve(
+        "load_model",
+        chunks=[chunk],
+        embedder=lambda _question: [1.0, 0.0],
+        reranker=preserve_hybrid_order,
+    )
+    assert response["timing_ms"] == {"embed": 250.0, "search": 500.0, "rerank": 400.0}
+
+
+def test_keyword_candidates_stop_at_50_before_fusion():
+    chunks = [make_chunk(0, "CornellDataScience/adhd", "load_model")]
+    chunks[0]["id"] = "m-best"
+    for index in range(49):
+        words = " ".join(f"pad{index}x{n}" for n in range(index + 1))
+        filler = make_chunk(index + 1, "CornellDataScience/adhd", f"load_model {words}")
+        filler["id"] = f"filler-{index:02d}"
+        chunks.append(filler)
+    # Longer than every filler, so BM25 places this 51st and the keyword list drops it.
+    late_words = " ".join(f"latepad{n}" for n in range(120))
+    late = make_chunk(99, "CornellDataScience/adhd", f"load_model {late_words}")
+    late["id"] = "z-late"
+    late["embedding"] = [0.0, 1.0]
+    chunks.append(late)
+    response = retrieve(
+        "load_model",
+        k=1,
+        chunks=chunks,
+        embedder=lambda _question: [0.0, 1.0],
+        reranker=preserve_hybrid_order,
+    )
+    assert response["results"][0]["chunk"]["id"] == "m-best"
+
+
+def test_reranker_replaces_the_fusion_order_and_score():
+    best = make_chunk(1, "CornellDataScience/adhd", "load_model")
+    best["id"] = "a"
+    both = make_chunk(2, "CornellDataScience/adhd", "load_model extra")
+    both["id"] = "b"
+    also = make_chunk(3, "CornellDataScience/adhd", "load_model extra words here too")
+    also["id"] = "c"
+    response = retrieve(
+        "load_model",
+        k=3,
+        chunks=[best, both, also],
+        reranker=lambda _question, documents: [0.2, 0.4, 0.9][: len(documents)],
+    )
+    assert [hit["chunk"]["id"] for hit in response["results"]] == ["c", "b", "a"]
+    assert response["results"][0]["score"] == pytest.approx(0.9)
+    assert [hit["rank"] for hit in response["results"]] == [1, 2, 3]
+
+
+def test_reranker_must_score_each_candidate():
+    with pytest.raises(ValueError):
+        retrieve(
+            "load_model",
+            chunks=[make_chunk(2, "CornellDataScience/adhd", "load_model")],
+            reranker=lambda _question, _documents: [],
+        )

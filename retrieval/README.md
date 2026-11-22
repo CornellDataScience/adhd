@@ -1,6 +1,6 @@
 # Retrieval
 
-Decision record for step 6. Locked Nov 8, 2026. v0 is implemented. v1 and v2 are not. Build the remaining versions in order. Each version is the same function and the same response, so a later version replaces the ranker instead of adding an API.
+Decision record for step 6. Locked Nov 8, 2026. v0, v1, and v2 are implemented. Each version is the same function and the same response, so a later version replaces the ranker instead of adding an API.
 
 `RETRIEVAL_ARCHITECTURE.md` and `RETRIEVAL_OPTIONS_FOR_ADVISOR.md` are background. This file is the decision.
 
@@ -10,11 +10,11 @@ Decision record for step 6. Locked Nov 8, 2026. v0 is implemented. v1 and v2 are
 
 `k` defaults to 4 and is at most 30. `repos` limits the search to those repositories when it is set. Every version honors that filter.
 
-The response carries the question, `results` best-first, and `timing_ms`. Each result has `rank` (starting at 1; that number is the citation a later prompt will use), `score`, and `chunk` (a row matching `contracts/chunk.schema.json`). The contract describes `score` as a reranker score. Until v2, `score` is the score of the ranker that is actually running. `timing_ms` has `embed`, `search`, and `rerank`.
+The response carries the question, `results` best-first, and `timing_ms`. Each result has `rank` (starting at 1; that number is the citation a later prompt will use), `score`, and `chunk` (a row matching `contracts/chunk.schema.json`). `score` is the reranker score. `timing_ms` has `embed`, `search`, and `rerank`.
 
-Chunks are the rows already loaded into local Postgres from `samples/chunks.jsonl`. Retrieval reads that text. It does not call the `english` `tsvector` trigger. The trigger stays in the database.
+Chunks are the rows already loaded into local Postgres from `samples/chunks.jsonl`. Retrieval reads that text. It does not call the `simple` `tsvector` trigger. The trigger stays in the database.
 
-`vector(1536)` was never a model choice. That width is OpenAI `text-embedding-3-small`. The schema comment had paired it with Qwen3-Embedding-0.6B. Nothing has been embedded. The column is `vector(1024)` for the model in v1.
+`vector(1536)` was never a model choice. That width is OpenAI `text-embedding-3-small`. The column is `vector(1024)` for the model in v1. `index/embed.py` writes those vectors. A row stays unembedded until that script runs.
 
 `psycopg` is a project dependency, and `retrieval` is one of the hatch wheel packages.
 
@@ -26,7 +26,7 @@ BM25 is the lexical baseline in Lucene, Elasticsearch, and TREC. Use the standar
 
 Robertson and Zaragoza, *The Probabilistic Relevance Framework: BM25 and Beyond*.
 
-Postgres `ts_rank` does not use corpus-wide term statistics, so it is not that baseline. Do not put it back in as v0. The existing `english` `tsvector` trigger stays; retrieval does not use it.
+Postgres `ts_rank` does not use corpus-wide term statistics, so it is not that baseline. Do not put it back in as v0. The existing `simple` `tsvector` trigger stays; retrieval does not use it.
 
 PostgreSQL documentation, 12.3, Controlling Text Search ([textsearch-controls](https://www.postgresql.org/docs/current/textsearch-controls.html)).
 
@@ -38,11 +38,11 @@ Tokenizer, applied to the question and to each chunk:
 - Keep the raw identifier as its own token, so `load_model` still matches exactly.
 - No English stemmer.
 
-Run BM25 in process over the chunk text already stored in Postgres. At the sample size that is the simple version. `timing_ms.embed` and `timing_ms.rerank` are 0. `timing_ms.search` is this pass. `score` is the BM25 score.
+Run BM25 in process over the chunk text already stored in Postgres. At the sample size that is the simple version. This list is the keyword side of v1. The response `score` is the fusion score, including when no chunk has an embedding and this is the only list.
 
-## v1 — hybrid (not implemented)
+## v1 — hybrid (implemented)
 
-Take a keyword list and a vector list, up to 50 hits each. The keyword list is the v0 BM25 ranker. The vector list is cosine over the stored embeddings. Merge the lists with reciprocal rank fusion and return `k`.
+Take a keyword list and a vector list, up to 50 hits each. The keyword list is the v0 BM25 ranker. The vector list is cosine over the stored embeddings. Merge the lists with reciprocal rank fusion and return `k`. A chunk with a null embedding is left out of the vector list and can still appear from BM25. If no chunk has an embedding, the question is not embedded: `timing_ms.embed` is 0 and the order matches BM25.
 
 `score = sum over lists of 1 / (60 + rank)`, with rank starting at 1. A chunk that appears in only one list still gets that list's term.
 
@@ -50,13 +50,15 @@ Take a keyword list and a vector list, up to 50 hits each. The keyword list is t
 
 Embedder: `Qwen/Qwen3-Embedding-0.6B`. 1024 dimensions, cosine similarity, Apache-2.0. About 75.4 on MTEB-Code. It is laptop-sized; the 4B and 8B variants are not the choice.
 
-Store 1024-d vectors. For the sample, scan with exact cosine. When the table is large, add an HNSW index. Do not create an IVFFlat index with `lists = 100`. That setting assumes on the order of 100,000 rows.
+Documents are the stored chunk text. Queries use the model-card wrapper, with no space after `Query:`: `Instruct: {task}\nQuery:{question}`. The task line asks for the code or documentation chunk that answers a question about a repository. Both sides are L2-normalized, so cosine is a dot product. Tests pass an `embedder` callable and do not download the model. `retrieval.embed.embed_query` is the default when a vector list is needed.
 
-`timing_ms.embed` is the time to embed the question. `timing_ms.rerank` stays 0. `timing_ms.search` is the two lists plus the merge. `score` is the fusion score.
+Store 1024-d vectors and set `embedding_model` to the same model id. The schema check requires those two columns to be both null or both set. For the sample, scan with exact cosine in process. When the table is large, add an HNSW index. Do not create an IVFFlat index with `lists = 100`. That setting assumes on the order of 100,000 rows.
 
-## v2 — rerank (not implemented)
+`timing_ms.embed` is the time to embed the question. `timing_ms.search` is the two lists plus the merge. This stage's score is the fusion score. The response `score` is the v2 reranker score.
 
-Rescore the top 20 hybrid hits with `Qwen/Qwen3-Reranker-0.6B` and return `k`.
+## v2 — rerank (implemented)
+
+Rescore the top 20 hybrid hits with `Qwen/Qwen3-Reranker-0.6B` and return `k`. The score is the probability of `yes`. The user block is `<Instruct>: {task}\n<Query>: {question}\n<Document>: {chunk text}`, with the same code-retrieval task as the embedder, wrapped in the model card's yes/no chat template. Tests pass a `reranker` callable and do not download the model. An empty candidate list does not load it. Equal scores keep the first-stage order.
 
 A cross-encoder second stage is the standard after a cheap first stage.
 

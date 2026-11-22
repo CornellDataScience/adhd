@@ -8,19 +8,31 @@ No trainer exists. `mamba3/generate.py` and `inference/prototype_server.py` only
 
 ## Where it runs
 
-Train on the cluster, Linux plus an NVIDIA GPU, official `mamba_ssm` kernels.
+Train on a rented Linux NVIDIA GPU (Runpod RTX 4090 Secure Cloud is the current choice), official `mamba_ssm` kernels. Do not start a long Pod until the smoke CLI has been run once on that machine.
 
 ```bash
 uv sync --extra cuda
 ```
 
-`load_model(..., backend="auto")` picks those kernels when CUDA and `mamba_ssm` are both present. The CUDA extra has not been run on the cluster yet. If the machine is Blackwell (sm_100+) or the driver is CUDA 13, the `pytorch-cu126` index in `pyproject.toml` has to change to `cu130` before the first job.
+`load_model(..., backend="auto")` picks those kernels when CUDA and `mamba_ssm` are both present. If the host is CUDA 13, change the `pytorch-cu126` index in `pyproject.toml` to `cu130` before the first job.
 
-The laptop PyTorch port stays for reading checkpoints and for the backward-pass unit test. It is SISO only, and a measured 187M decode is about 22 tok/s in fp32. A training run does not belong there.
-
-Data packing can happen on a laptop. The GPU job only reads packed token files.
+The laptop PyTorch port stays for unit tests and for reading checkpoints. Packing can run on a laptop. The GPU job only reads packed token files.
 
 Start with `siso-187m`. MIMO checkpoints need the official backend and are out of this plan. `siso-443m` is the second run, after 187M has moved the Python perplexity. `siso-893m` and `siso-1.5b` wait until the recipe is known.
+
+## Implemented modules
+
+These exist under `mamba3/train/` (and `prompting_eval/prompt.py`). Full weights only. No LoRA.
+
+| Module | Command |
+|---|---|
+| Pack | `uv run python -m mamba3.train.pack --local-dir … --out …` or `--dataset bigcode/starcoderdata --data-dir python` |
+| Smoke | `uv run python -m mamba3.train.smoke --tiny --steps 5 --out /tmp/smoke` (wiring). On GPU: `--model siso-187m --steps 10 --seq-len 128 --out /workspace/smoke` |
+| CPT | `uv run python -m mamba3.train.cpt --model siso-187m --data …/packed --out …/ckpts --token-budget …` |
+| SFT | `uv run python -m mamba3.train.sft --model …/ckpts/last --data sft.jsonl --out …/sft` |
+| PPL | `uv run python -m mamba3.train.ppl --model … --data …/packed` or `--text-file …` |
+
+Unit tests: `uv run pytest tests/test_train.py`.
 
 ## LoRA
 
@@ -43,9 +55,9 @@ LoRA is an option only for the later citation pass, and only if the code-adapted
 
 Hold the eval repos out of both training sets before the first run. If the model trains on the files the questions ask about, a higher score is partly memorization. Public code is the continued-pretraining corpus. CDS facts still come from `retrieve()`.
 
-## Modules to build
+## Modules
 
-Nothing below exists yet. Names are the pieces to add. They sit next to the model because they load it and write a directory `load_model` can read back.
+Built under `mamba3/train/`. They load the model and write a directory `load_model` can read back.
 
 `mamba3/train/pack.py`
 Tokenize with `TOKENIZER_ID` and pack documents into length 2048, the checkpoint context. Emit a memmap or a directory of `.bin` files of `int32` token ids, plus a small manifest (source repo, byte count, holdout flag). No padding inside a packed sequence. A short final sequence is dropped or kept and masked, and the choice is recorded in the manifest.

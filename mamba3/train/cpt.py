@@ -79,8 +79,9 @@ def main():
 
     device = _device(args.device)
     dtype = _dtype(args.dtype, device)
+    load_dtype = torch.float32 if device == "cuda" and dtype == torch.float16 else dtype
     backend = "torch" if device != "cuda" and args.backend == "auto" else args.backend
-    model = load_trainable(args.model, backend=backend, device=device, dtype=dtype)
+    model = load_trainable(args.model, backend=backend, device=device, dtype=load_dtype)
 
     amp = "bf16" if device == "cuda" and dtype == torch.bfloat16 else ("fp16" if device == "cuda" else None)
     cfg = TrainConfig(

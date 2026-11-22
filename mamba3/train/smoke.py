@@ -88,10 +88,13 @@ def main():
 
     device = _device(args.device)
     dtype = _dtype(args.dtype, device)
+    # FP16 autocast needs FP32 weights for GradScaler. On CUDA with float16
+    # request, keep parameters in float32 and autocast the forward.
+    load_dtype = torch.float32 if device == "cuda" and dtype == torch.float16 else dtype
     args.out.mkdir(parents=True, exist_ok=True)
 
     if args.tiny:
-        model = build_tiny(device, dtype)
+        model = build_tiny(device, load_dtype)
         vocab = TINY_CONFIG["vocab_size"]
         backend_used = "tiny"
     else:
@@ -101,18 +104,32 @@ def main():
             backend = "torch"
         else:
             backend = args.backend
-        model = load_trainable(args.model, backend=backend, device=device, dtype=dtype)
+        model = load_trainable(args.model, backend=backend, device=device, dtype=load_dtype)
         vocab = int(getattr(model.config, "vocab_size", None) or model.config["vocab_size"])
         backend_used = backend
 
     # One forward shape check before the loop.
     probe = torch.randint(0, vocab, (args.batch_size, min(args.seq_len, 32)), device=device)
     logits = model_logits(model, probe)
-    print(json.dumps({"logits_shape": list(logits.shape), "device": device, "backend": backend_used}))
+    print(
+        json.dumps(
+            {
+                "logits_shape": list(logits.shape),
+                "device": device,
+                "backend": backend_used,
+                "param_dtype": str(next(model.parameters()).dtype).replace("torch.", ""),
+            }
+        )
+    )
     if list(logits.shape) != [args.batch_size, probe.shape[1], logits.shape[-1]]:
         raise SystemExit(f"unexpected logits shape {tuple(logits.shape)}")
 
-    amp = "bf16" if device == "cuda" and dtype == torch.bfloat16 else ("fp16" if device == "cuda" else None)
+    if device == "cuda" and dtype == torch.bfloat16:
+        amp = "bf16"
+    elif device == "cuda":
+        amp = "fp16"
+    else:
+        amp = None
     cfg = TrainConfig(
         lr=args.lr,
         total_steps=args.steps,

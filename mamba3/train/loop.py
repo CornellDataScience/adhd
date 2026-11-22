@@ -90,8 +90,11 @@ def train_steps(
         )
 
     amp = _amp_dtype(cfg.amp_dtype, device)
-    use_scaler = amp == torch.float16
-    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler) if device.type == "cuda" else None
+    # GradScaler only works with FP32 parameters. If the model was loaded in
+    # float16, skip the scaler and train without unscale (Colab T4 path).
+    param_dtype = next(model.parameters()).dtype
+    use_scaler = device.type == "cuda" and amp == torch.float16 and param_dtype == torch.float32
+    scaler = torch.amp.GradScaler("cuda", enabled=use_scaler) if use_scaler else None
 
     log_file = Path(log_path) if log_path else None
     if log_file:

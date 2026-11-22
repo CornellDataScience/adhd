@@ -112,6 +112,27 @@ def test_train_steps_loss_moves(tmp_path: Path):
     assert all(torch.isfinite(torch.tensor(row["loss"])) for row in records)
 
 
+def test_fp16_parameter_model_skips_grad_scaler(tmp_path: Path):
+    """Mirrors the Colab failure: FP16 weights + fp16 amp must not call unscale_."""
+    if not torch.cuda.is_available():
+        pytest.skip("cuda required")
+    model = Mamba3LMHeadModel(TINY, device="cuda", dtype=torch.float16)
+    model.train()
+
+    def batches():
+        while True:
+            yield StepBatch(input_ids=torch.randint(0, 128, (1, 16), device="cuda"))
+
+    records = train_steps(
+        model,
+        batches(),
+        steps=2,
+        out_dir=tmp_path / "fp16",
+        cfg=TrainConfig(lr=1e-3, total_steps=2, warmup_steps=0, amp_dtype="fp16", accumulate=1),
+    )
+    assert len(records) == 2
+
+
 def test_build_prompt_numbers_sources():
     response = {
         "question": "How does load_model pick a backend?",

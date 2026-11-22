@@ -32,7 +32,8 @@ These exist under `mamba3/train/` (and `prompting_eval/prompt.py`). Full weights
 | SFT | `uv run python -m mamba3.train.sft --model …/ckpts/last --data sft.jsonl --out …/sft` |
 | PPL | `uv run python -m mamba3.train.ppl --model … --data …/packed` or `--text-file …` |
 
-Unit tests: `uv run pytest tests/test_train.py`.
+Unit + integration (no Hub download): `uv run pytest tests/test_train.py tests/test_train_integration.py`.  
+The integration suite runs the tiny smoke CLI, pack → CPT → reload → ppl, and citation SFT masking.
 
 ## LoRA
 
